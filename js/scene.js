@@ -1,28 +1,28 @@
 // Vault room construction.
 //
 // Builds:
-//   - Floor + 4 walls + ceiling (mesh + static physics)
-//   - Vault door with hinge constraint (so it swings on Cannon-ES physics)
-//   - Keypad, drill bolt, and lockpick lock surface (interaction targets)
-//   - Loot items (gold bars, gem) inside the vault
-//   - Duffel bag drop zone next to the player
-//   - Lighting
-//
-// NOTE for the team: replace the procedural vault door, tools, and loot meshes
-// with custom .glb files exported from Blender by dropping them in /models and
-// loading them with GLTFLoader (see commented stub in createVaultDoor).
+//   - Sealed room (floor, ceiling, 4 walls - no exits except the vault)
+//   - Vault dividing wall with a doorway opening, plus a back wall behind it
+//   - Vault door with hinge constraint (Cannon-ES) - rivets clustered around
+//     the wheel handle, not scattered over the door surface
+//   - Keypad, drill bolt, and lockpick keyhole (interaction targets)
+//   - Tool pickups on the spawn-side table (lockpick, hacker, drill)
+//   - A note on the table that displays the random unlock sequence
+//   - Loot (gold coins) inside the vault
+//   - Duffel bag drop zone
 
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { buildToolMesh } from './tools.js';
 
 // ---- Materials ----
 const concreteMat = new THREE.MeshStandardMaterial({ color: 0x383841, roughness: 0.95, metalness: 0.05 });
 const steelMat = new THREE.MeshStandardMaterial({ color: 0x6b6b75, roughness: 0.4, metalness: 0.85 });
 const goldMat = new THREE.MeshStandardMaterial({ color: 0xffcc33, roughness: 0.25, metalness: 1.0, emissive: 0x000000 });
-const gemMat = new THREE.MeshStandardMaterial({ color: 0x33ddff, roughness: 0.05, metalness: 0.2, emissive: 0x113344 });
+const rivetMat = new THREE.MeshStandardMaterial({ color: 0x222228, roughness: 0.5, metalness: 0.9 });
 
-export function buildVaultRoom(scene, world, sync) {
+export function buildVaultRoom(scene, world, sync, sequence) {
     // ---- Lights ----
     scene.add(new THREE.HemisphereLight(0xb0b0b0, 0x111111, 0.55));
 
@@ -36,12 +36,16 @@ export function buildVaultRoom(scene, world, sync) {
     keyLight.shadow.camera.bottom = -8;
     scene.add(keyLight);
 
-    // Warm spotlight on the vault door for cinematic feel
     const spot = new THREE.SpotLight(0xffaa55, 8, 8, Math.PI / 6, 0.4, 1.2);
     spot.position.set(0, 3.5, -1);
     spot.target.position.set(0, 1.3, -4.5);
     scene.add(spot);
     scene.add(spot.target);
+
+    // Light over the table so the player can read the note
+    const tableLight = new THREE.PointLight(0xfff0c0, 4, 4, 1.5);
+    tableLight.position.set(2.6, 1.8, 0);
+    scene.add(tableLight);
 
     // ---- Room dimensions ----
     const W = 8, D = 10, H = 3.5;
@@ -56,40 +60,29 @@ export function buildVaultRoom(scene, world, sync) {
     floorBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
     world.addBody(floorBody);
 
-    // Ceiling
     const ceil = new THREE.Mesh(new THREE.PlaneGeometry(W, D), concreteMat);
     ceil.rotation.x = Math.PI / 2;
     ceil.position.set(0, H, -D / 2 + 2);
     scene.add(ceil);
 
-    // Track every collider the player should not be able to pass through.
+    // ---- Outer walls (sealed - player cannot escape the room) ----
     const blockers = [];
+    blockers.push(addWall(scene, world, { w: W, h: H, x: 0, y: H / 2, z: -D + 2, rotY: 0 }));               // back outer wall
+    blockers.push(addWall(scene, world, { w: D, h: H, x: -W / 2, y: H / 2, z: -D / 2 + 2, rotY: Math.PI / 2 })); // left
+    blockers.push(addWall(scene, world, { w: D, h: H, x: W / 2, y: H / 2, z: -D / 2 + 2, rotY: -Math.PI / 2 })); // right
+    blockers.push(addWall(scene, world, { w: W, h: H, x: 0, y: H / 2, z: 2, rotY: Math.PI }));              // front (sealed)
 
-    // Outer walls (back, left, right)
-    blockers.push(addWall(scene, world, { w: W, h: H, x: 0, y: H / 2, z: -D + 2, rotY: 0 }));
-    blockers.push(addWall(scene, world, { w: D, h: H, x: -W / 2, y: H / 2, z: -D / 2 + 2, rotY: Math.PI / 2 }));
-    blockers.push(addWall(scene, world, { w: D, h: H, x: W / 2, y: H / 2, z: -D / 2 + 2, rotY: -Math.PI / 2 }));
-    // Front wall with doorway opening cut: two slim walls flanking the entry
-    blockers.push(addWall(scene, world, { w: 2.5, h: H, x: -2.75, y: H / 2, z: 2, rotY: Math.PI }));
-    blockers.push(addWall(scene, world, { w: 2.5, h: H, x: 2.75, y: H / 2, z: 2, rotY: Math.PI }));
-
-    // ---- Vault wall (separates antechamber from vault interior) ----
-    // The door is the only opening - solid collision everywhere else so the
-    // player can't sneak around the door.
-    // Placed at z=-4.8 so its physics body doesn't overlap with the door body
-    // at z=-4.5 (door extends to z=-4.65).
+    // ---- Vault dividing wall (with door opening) ----
     const vaultWallPanels = addVaultWall(scene, world, {
         wallW: W, wallH: H, openingW: 2.1, openingH: 2.7, z: -4.8
     });
     blockers.push(...vaultWallPanels);
 
-    // ---- Vault door (with hinge) ----
+    // ---- Vault door (procedural, with rivets around the wheel) ----
     const vault = createVaultDoor(scene, world, sync);
-    // Door blocks the player when closed; once it swings open, its bbox moves
-    // out of the doorway and the player can walk through.
     blockers.push(vault.door);
 
-    // ---- Interaction targets in front of door ----
+    // ---- Interaction targets ----
     // Keypad on the right side of the door
     const keypadMesh = new THREE.Mesh(
         new THREE.BoxGeometry(0.35, 0.45, 0.04),
@@ -112,25 +105,27 @@ export function buildVaultRoom(scene, world, sync) {
     lockMesh.userData.interaction = 'lock';
     scene.add(lockMesh);
 
-    // Drill bolt - the final stage target on the door itself
+    // Drill bolt on the door itself
     const boltMesh = new THREE.Mesh(
         new THREE.CylinderGeometry(0.09, 0.09, 0.08, 12),
         new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.5, metalness: 0.9 })
     );
     boltMesh.rotation.x = Math.PI / 2;
-    boltMesh.position.set(0, 1.6, -4.42);
+    boltMesh.position.set(-0.65, 1.6, -4.34);
     boltMesh.castShadow = true;
     boltMesh.userData.interaction = 'bolt';
     scene.add(boltMesh);
 
-    // ---- Loot items (inside vault, get revealed when door opens) ----
+    // ---- Tool table + tools + note ----
+    createToolTable(scene);
+    const tableTools = createTableTools(scene, world, sync);
+    const sequenceNote = createSequenceNote(scene, sequence);
+
+    // ---- Loot items (inside vault) ----
     const lootItems = createLoot(scene, world, sync);
 
-    // ---- Duffel bag drop zone (in front of player) ----
+    // ---- Duffel bag drop zone ----
     const bag = createDuffelBag(scene);
-
-    // ---- Tool table to the player's right ----
-    createToolTable(scene);
 
     return {
         door: vault.door,
@@ -139,68 +134,51 @@ export function buildVaultRoom(scene, world, sync) {
         keypad: keypadMesh,
         lock: lockMesh,
         bolt: boltMesh,
+        tableTools,
+        sequenceNote,
         lootItems,
         bag,
         blockers,
     };
 }
 
-// Vault dividing wall with a doorway opening. Built from 3 solid panels:
-// left of door, right of door, and lintel above door. Each panel has matching
-// physics collision so the player cannot walk through the wall.
+// ---------------------------------------------------------------------------
+// Vault dividing wall (with doorway opening)
+// ---------------------------------------------------------------------------
 function addVaultWall(scene, world, { wallW, wallH, openingW, openingH, z }) {
     const sideW = (wallW - openingW) / 2;
     const lintelH = wallH - openingH;
 
     const wallMat = new THREE.MeshStandardMaterial({
-        color: 0x2a2a30,
-        roughness: 0.85,
-        metalness: 0.15,
+        color: 0x2a2a30, roughness: 0.85, metalness: 0.15,
     });
 
     const panels = [];
-    // ---- Left panel ----
     panels.push(addWallPanel(scene, world, wallMat, {
-        w: sideW, h: wallH,
-        x: -openingW / 2 - sideW / 2,
-        y: wallH / 2,
-        z,
+        w: sideW, h: wallH, x: -openingW / 2 - sideW / 2, y: wallH / 2, z,
+    }));
+    panels.push(addWallPanel(scene, world, wallMat, {
+        w: sideW, h: wallH, x: openingW / 2 + sideW / 2, y: wallH / 2, z,
+    }));
+    panels.push(addWallPanel(scene, world, wallMat, {
+        w: openingW, h: lintelH, x: 0, y: openingH + lintelH / 2, z,
     }));
 
-    // ---- Right panel ----
-    panels.push(addWallPanel(scene, world, wallMat, {
-        w: sideW, h: wallH,
-        x: openingW / 2 + sideW / 2,
-        y: wallH / 2,
-        z,
-    }));
-
-    // ---- Lintel (above the doorway) ----
-    panels.push(addWallPanel(scene, world, wallMat, {
-        w: openingW, h: lintelH,
-        x: 0,
-        y: openingH + lintelH / 2,
-        z,
-    }));
-
-    // Decorative trim around the doorway frame
+    // Doorway frame trim
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x4a3a20, roughness: 0.5, metalness: 0.7 });
     const trimT = 0.08;
-    // Left trim
     const trimL = new THREE.Mesh(new THREE.BoxGeometry(trimT, openingH, trimT), trimMat);
     trimL.position.set(-openingW / 2, openingH / 2, z + 0.05);
     trimL.castShadow = true;
     scene.add(trimL);
-    // Right trim
     const trimR = new THREE.Mesh(new THREE.BoxGeometry(trimT, openingH, trimT), trimMat);
     trimR.position.set(openingW / 2, openingH / 2, z + 0.05);
     trimR.castShadow = true;
     scene.add(trimR);
-    // Top trim
-    const trimT_ = new THREE.Mesh(new THREE.BoxGeometry(openingW + trimT, trimT, trimT), trimMat);
-    trimT_.position.set(0, openingH, z + 0.05);
-    trimT_.castShadow = true;
-    scene.add(trimT_);
+    const trimTop = new THREE.Mesh(new THREE.BoxGeometry(openingW + trimT, trimT, trimT), trimMat);
+    trimTop.position.set(0, openingH, z + 0.05);
+    trimTop.castShadow = true;
+    scene.add(trimTop);
 
     return panels;
 }
@@ -213,7 +191,6 @@ function addWallPanel(scene, world, material, { w, h, x, y, z }) {
     mesh.receiveShadow = true;
     scene.add(mesh);
 
-    // Static physics box
     const body = new CANNON.Body({ mass: 0 });
     body.addShape(new CANNON.Box(new CANNON.Vec3(w / 2, h / 2, thickness / 2)));
     body.position.set(x, y, z);
@@ -228,7 +205,6 @@ function addWall(scene, world, { w, h, x, y, z, rotY }) {
     mesh.receiveShadow = true;
     scene.add(mesh);
 
-    // Static physics box for collision (thin slab)
     const halfThick = 0.05;
     const box = new CANNON.Box(new CANNON.Vec3(w / 2, h / 2, halfThick));
     const body = new CANNON.Body({ mass: 0 });
@@ -240,95 +216,87 @@ function addWall(scene, world, { w, h, x, y, z, rotY }) {
 }
 
 // ---------------------------------------------------------------------------
-// Vault door + hinge
+// Vault door + hinge.
+// Procedural construction (we skip the GLB on purpose - the rivets in the
+// auto-generated GLB were spread across the whole door surface, which looked
+// messy. We build a cleaner door here with rivets clustered around the wheel.)
 // ---------------------------------------------------------------------------
 function createVaultDoor(scene, world, sync) {
-    const doorW = 2.0, doorH = 2.6, doorT = 0.3;
+    const doorW = 2.15, doorH = 2.6, doorT = 0.3; // slightly wider than the
+    // 2.1m opening so the door visually overlaps the wall and there are no gaps
 
-    // Door is an empty Group so we can either fill it with the procedural
-    // placeholder OR replace its children with the loaded vault_door.glb.
     const doorMesh = new THREE.Group();
     doorMesh.castShadow = true;
     scene.add(doorMesh);
 
-    // ---- Procedural placeholder (visible until vault_door.glb loads) ----
+    // Door slab
     const slab = new THREE.Mesh(
         new THREE.BoxGeometry(doorW, doorH, doorT),
-        new THREE.MeshStandardMaterial({ color: 0x707078, roughness: 0.35, metalness: 0.95 })
+        new THREE.MeshStandardMaterial({ color: 0x6a6a72, roughness: 0.35, metalness: 0.95 })
     );
     slab.castShadow = true;
-    slab.name = 'proceduralPlaceholder';
     doorMesh.add(slab);
 
+    // Wheel handle (front-facing)
     const wheel = new THREE.Mesh(
         new THREE.TorusGeometry(0.32, 0.05, 12, 32),
         steelMat
     );
-    wheel.position.set(0, 0, 0.18);
+    wheel.position.set(0, 0, doorT / 2 + 0.03);
     slab.add(wheel);
+
+    // Crossing spokes
     const spoke = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.65, 8), steelMat);
     spoke.rotation.z = Math.PI / 2;
-    spoke.position.set(0, 0, 0.18);
+    spoke.position.set(0, 0, doorT / 2 + 0.03);
     slab.add(spoke);
     const spoke2 = spoke.clone();
     spoke2.rotation.z = 0;
     slab.add(spoke2);
 
-    // ---- Try to load the Blender-built vault_door.glb ----
-    const loader = new GLTFLoader();
-    loader.load('models/vault_door.glb', (gltf) => {
-        console.log('[heist] vault_door.glb loaded successfully');
-        // Remove the procedural placeholder
-        const placeholder = doorMesh.getObjectByName('proceduralPlaceholder');
-        if (placeholder) doorMesh.remove(placeholder);
+    // Center hub
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.04, 16), steelMat);
+    hub.rotation.x = Math.PI / 2;
+    hub.position.set(0, 0, doorT / 2 + 0.05);
+    slab.add(hub);
 
-        const model = gltf.scene;
-        model.traverse((c) => { if (c.isMesh) c.castShadow = true; });
+    // Rivets in a TIGHT ring around the wheel (radius 0.46m)
+    const rivetGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.04, 10);
+    const ringRadius = 0.46;
+    for (let i = 0; i < 12; i++) {
+        const t = (i / 12) * Math.PI * 2;
+        const rivet = new THREE.Mesh(rivetGeo, rivetMat);
+        rivet.rotation.x = Math.PI / 2;
+        rivet.position.set(Math.cos(t) * ringRadius, Math.sin(t) * ringRadius, doorT / 2 + 0.01);
+        slab.add(rivet);
+    }
 
-        // Flip 180 around Y. Blender's +Y axis (where the wheel handle and
-        // rivets were placed in build_assets.py) becomes -Z after GLTF export,
-        // which puts the "front" of the door on the far side from the player.
-        // Rotating the model 180 around Y faces the front toward the player.
-        model.rotation.y = Math.PI;
-
-        // Auto-fit the model to the physics body's expected dimensions.
-        // The Blender script outputs a door slightly larger than 2.0 x 2.6 x 0.3
-        // because of the bevel and rivets - we scale uniformly so it fits.
-        const bbox = new THREE.Box3().setFromObject(model);
-        const size = new THREE.Vector3();
-        bbox.getSize(size);
-        const targetWidth = doorW;
-        const scale = targetWidth / Math.max(size.x, 0.001);
-        model.scale.setScalar(scale);
-
-        // Re-center on the door group's origin
-        bbox.setFromObject(model);
-        const center = new THREE.Vector3();
-        bbox.getCenter(center);
-        model.position.sub(center);
-
-        doorMesh.add(model);
-    }, undefined, (err) => {
-        console.warn('[heist] vault_door.glb not found - using procedural fallback. Did you run build_assets.py?', err);
-    });
+    // Four corner rivets
+    const cornerR = 0.04;
+    const cornerGeo = new THREE.CylinderGeometry(cornerR, cornerR, 0.04, 10);
+    const corners = [[-0.95, 1.15], [0.95, 1.15], [-0.95, -1.15], [0.95, -1.15]];
+    for (const [cx, cy] of corners) {
+        const r = new THREE.Mesh(cornerGeo, rivetMat);
+        r.rotation.x = Math.PI / 2;
+        r.position.set(cx, cy, doorT / 2 + 0.01);
+        slab.add(r);
+    }
 
     // Physics body - dynamic so the hinge can swing it
     const doorBody = new CANNON.Body({
         mass: 30,
         shape: new CANNON.Box(new CANNON.Vec3(doorW / 2, doorH / 2, doorT / 2)),
     });
-    // Door starts closed flush with the back wall of the antechamber
     const doorPos = new THREE.Vector3(0, doorH / 2, -4.5);
     doorBody.position.copy(doorPos);
     doorMesh.position.copy(doorPos);
     sync.add(doorMesh, doorBody);
 
-    // Anchor body on the right side - this is what the door hinges to
+    // Hinge anchor on the right side (so the door swings outward to the left)
     const anchor = new CANNON.Body({ mass: 0 });
     anchor.position.set(doorPos.x - doorW / 2, doorPos.y, doorPos.z);
     world.addBody(anchor);
 
-    // HingeConstraint about the vertical (Y) axis at the door's left edge
     const hinge = new CANNON.HingeConstraint(doorBody, anchor, {
         pivotA: new CANNON.Vec3(-doorW / 2, 0, 0),
         pivotB: new CANNON.Vec3(0, 0, 0),
@@ -336,7 +304,6 @@ function createVaultDoor(scene, world, sync) {
         axisB: new CANNON.Vec3(0, 1, 0),
     });
     world.addConstraint(hinge);
-    // Lock the hinge initially - state machine will release it on unlock
     hinge.enableMotor();
     hinge.setMotorSpeed(0);
     hinge.setMotorMaxForce(1e6);
@@ -345,7 +312,7 @@ function createVaultDoor(scene, world, sync) {
 }
 
 // ---------------------------------------------------------------------------
-// Keypad button labels (just visuals - the hacker tool deals with sequence)
+// Keypad button labels
 // ---------------------------------------------------------------------------
 function addKeypadButtons(parent) {
     const labels = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
@@ -360,7 +327,6 @@ function addKeypadButtons(parent) {
             parent.add(b);
         }
     }
-    // Status LED
     const led = new THREE.Mesh(
         new THREE.SphereGeometry(0.018, 12, 12),
         new THREE.MeshStandardMaterial({ color: 0xff3333, emissive: 0x991111 })
@@ -371,15 +337,117 @@ function addKeypadButtons(parent) {
 }
 
 // ---------------------------------------------------------------------------
-// Loot items inside the vault
+// Tool pickups on the spawn table
+// Each tool is a grabbable physics object with userData.toolId. When the
+// player grabs one, the vault state machine reads that toolId to validate
+// proximity-based use against the vault interaction targets.
+// ---------------------------------------------------------------------------
+function createTableTools(scene, world, sync) {
+    const tableY = 1.0; // top of table at y=0.95+thickness/2; place tools just above
+    const tableX = 2.6;
+    const tableZ = 0;
+
+    const layout = [
+        { id: 'lockpick', label: 'LOCKPICK', dx: -0.35, dz: -0.1 },
+        { id: 'hacker', label: 'HACKER',     dx:  0.0,  dz:  0.05 },
+        { id: 'drill', label: 'DRILL',       dx:  0.35, dz: -0.1 },
+    ];
+
+    const tools = [];
+    for (const def of layout) {
+        const mesh = buildToolMesh(def.id);
+        // Stand the tool upright on the table. The procedural builders in
+        // tools.js have their grip point near origin and the working tip in +Y.
+        mesh.position.set(tableX + def.dx, tableY, tableZ + def.dz);
+        mesh.rotation.x = Math.PI / 6; // slight tilt toward the player
+        mesh.userData.toolId = def.id;
+        mesh.userData.toolName = def.label;
+        mesh.userData.isTool = true;
+        scene.add(mesh);
+
+        // A simple box collider sized to roughly contain the tool
+        const body = new CANNON.Body({
+            mass: 0.2,
+            shape: new CANNON.Box(new CANNON.Vec3(0.06, 0.1, 0.06)),
+        });
+        body.position.copy(mesh.position);
+        sync.add(mesh, body);
+
+        tools.push({ mesh, body });
+    }
+    return tools;
+}
+
+// ---------------------------------------------------------------------------
+// Sequence note - a piece of paper on the table that lists the random
+// unlock sequence the player must follow.
+// ---------------------------------------------------------------------------
+function createSequenceNote(scene, sequence) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 384;
+    const ctx = canvas.getContext('2d');
+
+    // Paper background
+    ctx.fillStyle = '#f4ecd0';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Faint coffee-stain shadow
+    ctx.fillStyle = 'rgba(120, 80, 40, 0.08)';
+    ctx.beginPath();
+    ctx.arc(380, 50, 60, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Header
+    ctx.fillStyle = '#1a1a1a';
+    ctx.font = 'bold 36px Georgia, serif';
+    ctx.fillText('VAULT INSTRUCTIONS', 50, 60);
+
+    ctx.font = 'italic 22px Georgia, serif';
+    ctx.fillStyle = '#3a2a1a';
+    ctx.fillText('Follow the steps in order:', 50, 105);
+
+    // Steps
+    ctx.font = 'bold 28px Georgia, serif';
+    ctx.fillStyle = '#1a1a1a';
+    sequence.forEach((step, i) => {
+        const y = 165 + i * 50;
+        ctx.fillText(`${i + 1}. Use ${step.toolLabel}`, 70, y);
+        ctx.font = '22px Georgia, serif';
+        ctx.fillText(`   on the ${step.targetLabel}`, 70, y + 28);
+        ctx.font = 'bold 28px Georgia, serif';
+    });
+
+    // Tip at the bottom
+    ctx.font = 'italic 18px Georgia, serif';
+    ctx.fillStyle = '#5a4a3a';
+    ctx.fillText('(Hold the tool close to its target)', 50, 360);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+
+    const noteMat = new THREE.MeshStandardMaterial({
+        map: tex,
+        roughness: 0.95,
+        metalness: 0,
+        side: THREE.DoubleSide,
+    });
+    const note = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 0.41), noteMat);
+    note.position.set(2.4, 1.001, 0.2);
+    note.rotation.x = -Math.PI / 2; // lay flat on the table
+    note.rotation.z = -0.1;          // small skew for a casual look
+    note.castShadow = false;
+    note.receiveShadow = true;
+    scene.add(note);
+    return note;
+}
+
+// ---------------------------------------------------------------------------
+// Loot - gold coins inside the vault
 // ---------------------------------------------------------------------------
 function createLoot(scene, world, sync) {
     const items = [];
     const inside = -6.5;
 
-    // ---- Five gold coins, scattered on the vault floor ----
-    // Coin = thin cylinder (radius 0.06m, height 0.012m). Engraved-look face
-    // via a slightly inset second cylinder on top.
     const coinPositions = [
         { x: -0.35, z: inside - 0.1, rot: 0.2 },
         { x: -0.10, z: inside + 0.05, rot: -0.5 },
@@ -394,31 +462,24 @@ function createLoot(scene, world, sync) {
     for (let i = 0; i < coinPositions.length; i++) {
         const { x, z, rot } = coinPositions[i];
 
-        // Outer disc (the coin body)
         const coin = new THREE.Mesh(
             new THREE.CylinderGeometry(coinRadius, coinRadius, coinHeight, 32),
             goldMat.clone()
         );
         coin.castShadow = true;
-        coin.position.set(x, 0.05 + i * 0.015, z); // tiny stagger so they don't z-fight
+        coin.position.set(x, 0.05 + i * 0.015, z);
         coin.rotation.y = rot;
         scene.add(coin);
 
-        // Engraved face (slightly raised inner ring for visual detail)
         const face = new THREE.Mesh(
             new THREE.CylinderGeometry(coinRadius * 0.7, coinRadius * 0.7, coinHeight * 1.05, 32),
             new THREE.MeshStandardMaterial({
-                color: 0xffaa00,
-                roughness: 0.35,
-                metalness: 1.0,
-                emissive: 0x331a00,
+                color: 0xffaa00, roughness: 0.35, metalness: 1.0, emissive: 0x331a00,
             })
         );
         face.position.y = 0.001;
         coin.add(face);
 
-        // Physics: coin = thin cylinder. Cannon's Cylinder shape has 4 args:
-        // (radiusTop, radiusBottom, height, numSegments)
         const body = new CANNON.Body({
             mass: 0.15,
             shape: new CANNON.Cylinder(coinRadius, coinRadius, coinHeight, 16),
@@ -430,7 +491,7 @@ function createLoot(scene, world, sync) {
         items.push({ mesh: coin, body });
     }
 
-    // Pedestal in the back (decorative)
+    // Pedestal in the back of the vault (decorative)
     const ped = new THREE.Mesh(
         new THREE.CylinderGeometry(0.4, 0.5, 0.5, 24),
         new THREE.MeshStandardMaterial({ color: 0x222228, roughness: 0.9 })
@@ -442,7 +503,6 @@ function createLoot(scene, world, sync) {
 }
 
 function createDuffelBag(scene) {
-    // Stylized open bag - just a flat dark trapezoid with a yellow rim
     const group = new THREE.Group();
     const body = new THREE.Mesh(
         new THREE.BoxGeometry(0.7, 0.35, 0.5),

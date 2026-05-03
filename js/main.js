@@ -1,31 +1,26 @@
 // VR Heist Simulator - Main Entry Point
 // ECE 376 Group 13 - Ryan, Alaa, George
 //
-// This file wires together:
-//  - Three.js scene + WebXR setup
-//  - Cannon-ES physics world (Lab 7)
-//  - VR controller input + raycasting (Lab 8)
-//  - Multi-tool inventory system
-//  - Vault unlock state machine
+// Wires together:
+//  - Three.js scene + WebXR
+//  - Cannon-ES physics (Lab 7)
+//  - VR controllers + raycasting (Lab 8)
+//  - Tool pickups on the spawn table (grab them, bring to vault target)
+//  - Random vault unlock sequence + proximity-based progress
 //  - Loot collection win condition
-//  - Desktop FPS-style fallback so the project is testable without a headset
+//  - Desktop FPS-style fallback for testing without a headset
 
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import CannonDebugger from 'cannon-es-debugger';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 import { buildVaultRoom } from './scene.js';
-import { ToolSystem } from './tools.js';
-import { VaultStateMachine } from './vault.js';
+import { VaultStateMachine, generateRandomSequence } from './vault.js';
 import { PhysicsSync } from './physics.js';
 import { DesktopController } from './desktop.js';
 
-// ---------------------------------------------------------------------------
-// Globals
-// ---------------------------------------------------------------------------
 let camera, scene, renderer;
 let physicsWorld;
 let raycaster;
@@ -33,7 +28,6 @@ let controller1, controller2;
 let controllerGrip1, controllerGrip2;
 let desktop;
 
-let toolSystem;
 let vault;
 let physicsSync;
 
@@ -55,9 +49,6 @@ const hud = {
 
 init();
 
-// Helper: works for both real XR controllers and the synthetic desktop one.
-// XRControllers have `.matrixWorld`; we just point the raycaster down -Z from
-// that matrix - same thing setFromXRController does internally.
 export function setRaycasterFromController(rc, controller) {
     const tmpMatrix = new THREE.Matrix4();
     tmpMatrix.identity().extractRotation(controller.matrixWorld);
@@ -88,22 +79,30 @@ function init() {
     physicsWorld.solver.iterations = 10;
     physicsSync = new PhysicsSync(physicsWorld);
 
-    const roomBuild = buildVaultRoom(scene, physicsWorld, physicsSync);
-    vault = new VaultStateMachine(roomBuild, physicsSync, onVaultOpen);
+    // Random unlock sequence is generated once at startup and passed to both
+    // the scene (for the note) and the vault state machine (for validation).
+    const sequence = generateRandomSequence();
+    console.log('[heist] sequence:', sequence.map(s => `${s.toolLabel}->${s.targetLabel}`).join(', '));
+
+    const roomBuild = buildVaultRoom(scene, physicsWorld, physicsSync, sequence);
+    vault = new VaultStateMachine(roomBuild, physicsSync, sequence, onVaultOpen);
 
     scene.add(grabbables);
 
-    const loader = new GLTFLoader();
-    toolSystem = new ToolSystem(scene, loader);
+    // Tool meshes and loot are all grabbable
+    for (const t of roomBuild.tableTools) grabbables.add(t.mesh);
+    for (const loot of roomBuild.lootItems) grabbables.add(loot.mesh);
 
     raycaster = new THREE.Raycaster();
     setupControllers();
 
-    // ---- Desktop fallback ----
+    // Desktop fallback. The fake controller is added to the scene so that
+    // attached grabbables render correctly when the player picks them up.
     desktop = new DesktopController(camera, renderer, renderer.domElement, roomBuild.blockers);
+    scene.add(desktop.fakeController);
     desktop.onTriggerStart = onSelectStart;
     desktop.onTriggerEnd = onSelectEnd;
-    desktop.onSqueeze = () => toolSystem.cycleTool(desktop.fakeController, refreshHUD);
+    desktop.onSqueeze = () => {}; // no-op: no more grip-cycle
 
     debugGroup = new THREE.Group();
     debugGroup.visible = false;
@@ -115,21 +114,17 @@ function init() {
 
     hud.lootTotal.textContent = roomBuild.lootItems.length;
     refreshHUD();
-
-    for (const loot of roomBuild.lootItems) grabbables.add(loot.mesh);
 }
 
 function setupControllers() {
     controller1 = renderer.xr.getController(0);
     controller1.addEventListener('selectstart', onSelectStart);
     controller1.addEventListener('selectend', onSelectEnd);
-    controller1.addEventListener('squeezestart', () => toolSystem.cycleTool(controller1, refreshHUD));
     scene.add(controller1);
 
     controller2 = renderer.xr.getController(1);
     controller2.addEventListener('selectstart', onSelectStart);
     controller2.addEventListener('selectend', onSelectEnd);
-    controller2.addEventListener('squeezestart', () => toolSystem.cycleTool(controller2, refreshHUD));
     scene.add(controller2);
 
     const factory = new XRControllerModelFactory();
@@ -155,26 +150,25 @@ function onSelectStart(event) {
     const controller = event.target;
     setRaycasterFromController(raycaster, controller);
 
-    const heldTool = toolSystem.getEquipped(controller);
-    if (heldTool) {
-        const used = vault.tryUseTool(heldTool, raycaster, controller);
-        if (used) { refreshHUD(); return; }
-    }
+    // If already holding something, do nothing (must release first)
+    if (controller.userData.selected) return;
 
-    const hits = raycaster.intersectObjects(grabbables.children, false);
-    if (hits.length > 0) {
-        const obj = hits[0].object;
-        physicsSync.setKinematic(obj, true);
-        controller.attach(obj);
-        controller.userData.selected = obj;
-        if (obj.material && obj.material.emissive) obj.material.emissive.setHex(0x444400);
-    }
+    const hits = raycaster.intersectObjects(grabbables.children, true);
+    if (hits.length === 0) return;
+
+    // Walk up the parent chain to find the actual grabbable root
+    let obj = hits[0].object;
+    while (obj && !grabbables.children.includes(obj)) obj = obj.parent;
+    if (!obj) return;
+
+    physicsSync.setKinematic(obj, true);
+    controller.attach(obj);
+    controller.userData.selected = obj;
+    if (obj.material && obj.material.emissive) obj.material.emissive.setHex(0x444400);
 }
 
 function onSelectEnd(event) {
     const controller = event.target;
-    vault.endUse();
-
     const obj = controller.userData.selected;
     if (!obj) return;
 
@@ -183,8 +177,11 @@ function onSelectEnd(event) {
     controller.userData.selected = undefined;
     physicsSync.setKinematic(obj, false);
 
+    // Loot dropped over the bag = collected
     const bagBounds = vault.getLootBagBounds();
-    if (bagBounds && bagBounds.containsPoint(obj.position)) collectLoot(obj);
+    if (bagBounds && bagBounds.containsPoint(obj.position) && obj.userData.lootValue) {
+        collectLoot(obj);
+    }
 }
 
 function collectLoot(mesh) {
@@ -201,16 +198,21 @@ function collectLoot(mesh) {
 }
 
 function onVaultOpen() {
-    hud.objective.textContent = 'Vault open! Grab the loot and drop it in the duffel bag.';
+    hud.objective.textContent = 'Vault open! Grab the gold coins, drop them in the bag.';
     hud.objective.style.color = '#ffcc55';
 }
 
 function refreshHUD() {
-    const equipped =
-        toolSystem.getEquipped(controller1) ||
-        toolSystem.getEquipped(controller2) ||
-        (desktop && toolSystem.getEquipped(desktop.fakeController));
-    hud.tool.textContent = equipped ? equipped.displayName : 'EMPTY HAND';
+    // What's in the player's hand right now?
+    const heldByDesktop = desktop?.fakeController.userData.selected;
+    const heldByC1 = controller1?.userData.selected;
+    const heldByC2 = controller2?.userData.selected;
+    const held = heldByDesktop || heldByC1 || heldByC2;
+    if (held && held.userData.toolName) {
+        hud.tool.textContent = held.userData.toolName;
+    } else {
+        hud.tool.textContent = 'EMPTY HAND';
+    }
     hud.stage.textContent = vault.getStageLabel();
     hud.lootCount.textContent = lootBag.length;
 }
@@ -218,9 +220,6 @@ function refreshHUD() {
 function setupKeyboardControls() {
     window.addEventListener('keydown', (e) => {
         switch (e.key.toLowerCase()) {
-            case 't':
-                toolSystem.cycleTool(desktop ? desktop.fakeController : controller1, refreshHUD);
-                break;
             case 'u':
                 vault.forceAdvance();
                 refreshHUD();
@@ -247,7 +246,15 @@ function animate() {
     physicsWorld.step(1 / 60, dt, 3);
     physicsSync.sync();
     if (desktop) desktop.update(dt);
-    vault.update(dt, raycaster, controller1, controller2, toolSystem);
+
+    // Pass all possible controllers to the vault so it can check held tools
+    vault.update(dt, [
+        controller1,
+        controller2,
+        desktop ? desktop.fakeController : null,
+    ]);
+
+    refreshHUD();
 
     if (isDebugVisible) cannonDebugger.update();
     renderer.render(scene, camera);

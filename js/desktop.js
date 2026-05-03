@@ -160,8 +160,10 @@ export class DesktopController {
         this._playerBox.min.set(x - r, 0.05, z - r);
         this._playerBox.max.set(x + r, PLAYER_HEIGHT, z + r);
         for (const b of this.blockers) {
-            // Skip invisible blockers (e.g. door once we want it pass-through)
+            // Skip invisible blockers
             if (!b.visible) continue;
+            // Skip the vault door once it's been unlocked / swung open.
+            if (b.userData?.isOpen) continue;
             this._tmpBox.setFromObject(b);
             if (this._playerBox.intersectsBox(this._tmpBox)) return true;
         }

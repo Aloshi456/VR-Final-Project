@@ -1,216 +1,198 @@
 // Vault unlock state machine.
 //
-// Stages (Category A: custom interaction / system feature):
-//   1. LOCKED         - default. Player must use lockpick on the lock cylinder.
-//   2. PICK_PROGRESS  - holding trigger w/ lockpick aimed at lock fills a meter.
-//   3. PICKED         - lockpick stage complete; LED on keypad turns yellow.
-//   4. KEYPAD_ACTIVE  - hacker tool aimed at keypad runs a "decryption" timer.
-//   5. KEYPAD_BYPASSED - keypad cracked; bolt becomes drillable.
-//   6. DRILLING       - drill aimed at bolt fills final meter.
-//   7. UNLOCKED       - hinge released; door swings open under physics.
+// The unlock sequence is RANDOMIZED each session - the 3 stages
+// (lockpick, hacker, drill) are shuffled, and the player must complete them
+// in the order written on the note on the table.
 //
-// The state machine exposes:
-//   - tryUseTool(tool, raycaster, controller)   on trigger press
-//   - update(dt, ...)                            for held-trigger progress
-//   - getStageLabel()                            for HUD
-//   - getLootBagBounds()                         for collection check
-//   - forceAdvance()                             dev shortcut
+// Progress is PROXIMITY-BASED: the player picks up a tool from the table,
+// and bringing it close to the matching interaction target fills a meter.
+// No trigger-hold required - just hold the tool near the target until the bar
+// fills. Wrong tool, wrong stage, or no tool in hand = no progress.
 
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 
-const STAGE = {
-    LOCKED: 'LOCKED',
-    PICKED: 'PICKED',
-    KEYPAD_BYPASSED: 'KEYPAD BYPASSED',
-    UNLOCKED: 'UNLOCKED',
-};
+// Stage durations (seconds the tool must be held against its target)
+const STAGE_DURATION = 4.0;
 
-// How long the player must hold a tool against its target (seconds)
-const PICK_DURATION = 4.0;
-const HACK_DURATION = 5.0;
-const DRILL_DURATION = 3.5;
+// Distance threshold (meters) - tool must be at least this close to target
+const USE_DISTANCE = 0.4;
 
-// Max distance the controller's ray must be within for the use to register
-const MAX_USE_DIST = 1.2;
+// Per-stage configuration. Each stage has:
+//   id        - the interaction target's userData.interaction value
+//   toolId    - the tool that must be held
+//   toolLabel - human-readable name (shown on note + HUD)
+//   targetLabel - human-readable name of the target (shown on note)
+const STAGES = [
+    { id: 'lock',   toolId: 'lockpick', toolLabel: 'LOCKPICK', targetLabel: 'KEYHOLE' },
+    { id: 'keypad', toolId: 'hacker',   toolLabel: 'HACKER',   targetLabel: 'KEYPAD' },
+    { id: 'bolt',   toolId: 'drill',    toolLabel: 'DRILL',    targetLabel: 'BOLT' },
+];
+
+export function generateRandomSequence() {
+    // Fisher-Yates shuffle on a copy
+    const seq = STAGES.slice();
+    for (let i = seq.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [seq[i], seq[j]] = [seq[j], seq[i]];
+    }
+    return seq;
+}
 
 export class VaultStateMachine {
-    constructor(roomBuild, sync, onOpen) {
+    constructor(roomBuild, sync, sequence, onOpen) {
         this.room = roomBuild;
         this.sync = sync;
         this.onOpen = onOpen;
-        this.stage = STAGE.LOCKED;
+        this.sequence = sequence;
+        this.currentStep = 0;          // 0..3, 3 = unlocked
+        this.progress = 0;             // 0..1 for the current step
 
-        // Held-trigger progress (0..1)
-        this.pickProgress = 0;
-        this.hackProgress = 0;
-        this.drillProgress = 0;
+        // Lookup by id
+        this.targets = {
+            lock:   roomBuild.lock,
+            keypad: roomBuild.keypad,
+            bolt:   roomBuild.bolt,
+        };
 
-        // While trigger is held with the right tool aimed at the right target
-        this._activeUse = null; // { tool, controller, target }
+        // Single progress bar - floats above the current target.
+        // We move it as the player advances stages.
+        this._progressBar = makeProgressBar(0xffaa22);
+        this._progressBar.visible = false;
+        roomBuild.lock.parent.add(this._progressBar);
 
-        // Progress bars (3 stacked rings above each interaction target)
-        this._pickBar = makeProgressBar(0xff6633);
-        this._pickBar.position.copy(this.room.lock.position).add(new THREE.Vector3(0, 0.18, 0));
-        this.room.lock.parent.add(this._pickBar);
+        this._tmpVecA = new THREE.Vector3();
+        this._tmpVecB = new THREE.Vector3();
 
-        this._hackBar = makeProgressBar(0x33ff66);
-        this._hackBar.position.copy(this.room.keypad.position).add(new THREE.Vector3(0, 0.32, 0));
-        this.room.keypad.parent.add(this._hackBar);
-
-        this._drillBar = makeProgressBar(0xffaa22);
-        this._drillBar.position.copy(this.room.bolt.position).add(new THREE.Vector3(0, 0.18, 0));
-        this.room.bolt.parent.add(this._drillBar);
-
-        this._setBarFill(this._pickBar, 0);
-        this._setBarFill(this._hackBar, 0);
-        this._setBarFill(this._drillBar, 0);
+        this._positionProgressBar();
     }
 
-    getStageLabel() { return this.stage; }
-
-    // Called on selectstart. Returns true if the trigger press was consumed
-    // by the vault (so main.js doesn't also try to grab loot).
-    tryUseTool(tool, raycaster, controller) {
-        const target = this._raycastTarget(raycaster);
-        if (!target) return false;
-        if (!this._isToolValid(tool.id, target)) return false;
-        this._activeUse = { tool, controller, targetName: target.userData.interaction };
-        return true;
+    getStageLabel() {
+        if (this.currentStep >= this.sequence.length) return 'UNLOCKED';
+        const next = this.sequence[this.currentStep];
+        return `Step ${this.currentStep + 1}/${this.sequence.length}: ${next.toolLabel} on ${next.targetLabel}`;
     }
 
-    // Per-frame: drain the appropriate progress meter while trigger is held
-    // and the ray still points at the right thing.
-    update(dt, raycaster, c1, c2, toolSystem) {
-        if (!this._activeUse) {
-            // Decay progress bars slightly so a fumbled attempt doesn't snap back to 0 instantly
-            this.pickProgress = Math.max(0, this.pickProgress - dt * 0.15);
-            this.hackProgress = Math.max(0, this.hackProgress - dt * 0.15);
-            this.drillProgress = Math.max(0, this.drillProgress - dt * 0.15);
-            this._refreshBars();
-            this._stepDoorSwing(dt);
+    getSequence() {
+        return this.sequence;
+    }
+
+    // Per-frame update. controllers is an array; for each, we check what
+    // (if anything) is held in controller.userData.selected. If it's a tool
+    // with the right toolId for the current step, and it's near the target,
+    // we tick the progress meter.
+    update(dt, controllers) {
+        if (this.currentStep >= this.sequence.length) {
+            this._progressBar.visible = false;
             return;
         }
 
-        // Validate the use is still going - controller still pointing at target?
-        const ctl = this._activeUse.controller;
-        if (!ctl) { this._endUse(); return; }
-        // Generic ray-from-controller (works for XR controllers AND the
-        // desktop fake controller from desktop.js).
-        const m = new THREE.Matrix4().identity().extractRotation(ctl.matrixWorld);
-        raycaster.ray.origin.setFromMatrixPosition(ctl.matrixWorld);
-        raycaster.ray.direction.set(0, 0, -1).applyMatrix4(m);
-        const target = this._raycastTarget(raycaster);
-        const validNow = target && target.userData.interaction === this._activeUse.targetName
-            && this._isToolValid(this._activeUse.tool.id, target);
+        const stage = this.sequence[this.currentStep];
+        const target = this.targets[stage.id];
+        if (!target) return;
 
-        if (!validNow) {
-            this._endUse();
-            return;
+        target.getWorldPosition(this._tmpVecA);
+
+        let closeWithCorrectTool = false;
+        for (const ctl of controllers) {
+            if (!ctl) continue;
+            const held = ctl.userData?.selected;
+            if (!held) continue;
+            if (held.userData?.toolId !== stage.toolId) continue;
+
+            held.getWorldPosition(this._tmpVecB);
+            const dist = this._tmpVecA.distanceTo(this._tmpVecB);
+            if (dist < USE_DISTANCE) {
+                closeWithCorrectTool = true;
+                break;
+            }
         }
 
-        // Tick the right meter
-        switch (this._activeUse.targetName) {
-            case 'lock':
-                this.pickProgress = Math.min(1, this.pickProgress + dt / PICK_DURATION);
-                if (this.pickProgress >= 1 && this.stage === STAGE.LOCKED) this._advanceTo(STAGE.PICKED);
-                break;
-            case 'keypad':
-                this.hackProgress = Math.min(1, this.hackProgress + dt / HACK_DURATION);
-                if (this.hackProgress >= 1 && this.stage === STAGE.PICKED) this._advanceTo(STAGE.KEYPAD_BYPASSED);
-                break;
-            case 'bolt':
-                this.drillProgress = Math.min(1, this.drillProgress + dt / DRILL_DURATION);
-                if (this.drillProgress >= 1 && this.stage === STAGE.KEYPAD_BYPASSED) this._advanceTo(STAGE.UNLOCKED);
-                break;
+        if (closeWithCorrectTool) {
+            this.progress = Math.min(1, this.progress + dt / STAGE_DURATION);
+        } else {
+            // Slow decay so the player doesn't have to be perfectly steady,
+            // but moving the tool away cancels meaningful progress over time.
+            this.progress = Math.max(0, this.progress - dt * 0.2);
         }
-        this._refreshBars();
-        this._stepDoorSwing(dt);
+
+        this._setBarFill(this._progressBar, this.progress);
+        this._progressBar.visible = this.progress > 0.001;
+        this._positionProgressBar();
+
+        if (this.progress >= 1) {
+            this._advanceStep();
+        }
     }
 
-    // Called on selectend
-    endUse() { this._endUse(); }
-    _endUse() { this._activeUse = null; }
+    _advanceStep() {
+        this.currentStep++;
+        this.progress = 0;
+        this._progressBar.visible = false;
 
-    // ----- Stage transitions -----
-    _advanceTo(stage) {
-        this.stage = stage;
-        if (stage === STAGE.PICKED) {
-            const led = this.room.keypad.getObjectByName('keypadLED');
-            if (led) led.material.color.setHex(0xffcc33);
-        }
-        if (stage === STAGE.KEYPAD_BYPASSED) {
-            const led = this.room.keypad.getObjectByName('keypadLED');
+        // Visual feedback on the just-completed target
+        const justFinished = this.sequence[this.currentStep - 1];
+        if (justFinished.id === 'lock') {
+            // dim the keyhole
+            this.targets.lock.material.color.setHex(0x335533);
+        } else if (justFinished.id === 'keypad') {
+            const led = this.targets.keypad.getObjectByName('keypadLED');
             if (led) led.material.color.setHex(0x33ff33);
-            // Color the bolt red to signal "drill me"
-            this.room.bolt.material.color.setHex(0xcc4422);
+        } else if (justFinished.id === 'bolt') {
+            this.targets.bolt.material.color.setHex(0x335533);
         }
-        if (stage === STAGE.UNLOCKED) {
+
+        if (this.currentStep >= this.sequence.length) {
             this._releaseDoor();
             if (this.onOpen) this.onOpen();
+        } else {
+            this._positionProgressBar();
         }
     }
 
     forceAdvance() {
-        const order = [STAGE.LOCKED, STAGE.PICKED, STAGE.KEYPAD_BYPASSED, STAGE.UNLOCKED];
-        const i = order.indexOf(this.stage);
-        if (i < order.length - 1) this._advanceTo(order[i + 1]);
+        if (this.currentStep < this.sequence.length) {
+            this.progress = 1;
+            this._advanceStep();
+        }
+    }
+
+    _positionProgressBar() {
+        if (this.currentStep >= this.sequence.length) return;
+        const stage = this.sequence[this.currentStep];
+        const target = this.targets[stage.id];
+        if (!target) return;
+        // Park the bar above the target, in target's parent space
+        const targetWorldPos = new THREE.Vector3();
+        target.getWorldPosition(targetWorldPos);
+        // Convert into the bar's parent's local space
+        const parent = this._progressBar.parent;
+        if (parent) {
+            parent.worldToLocal(targetWorldPos);
+        }
+        targetWorldPos.y += 0.18;
+        this._progressBar.position.copy(targetWorldPos);
     }
 
     _releaseDoor() {
-        // Disable motor, push the door open with a small impulse, and let
-        // physics + hinge handle the swing.
+        // Disable motor, push door open with a small impulse
         this.room.hinge.disableMotor();
         this.room.doorBody.wakeUp();
         this.room.doorBody.applyImpulse(
             new CANNON.Vec3(8, 0, -2),
             new CANNON.Vec3(0.8, 0, 0.1)
         );
+        // Hide the door from the desktop blocker check so the player can
+        // walk through. (DesktopController._collides skips invisible blockers.)
+        // We don't want to actually hide the mesh; we use a userData flag
+        // that the DesktopController checks instead.
+        this.room.door.userData.isOpen = true;
     }
 
-    _stepDoorSwing(dt) {
-        // No-op - hinge constraint + impulse handles the swing. Hook left
-        // here so the team can add a creak sound effect or auto-stop angle.
-    }
-
-    // ----- Validation helpers -----
-    _isToolValid(toolId, target) {
-        const i = target.userData.interaction;
-        if (i === 'lock' && toolId === 'lockpick') return this.stage === STAGE.LOCKED;
-        if (i === 'keypad' && toolId === 'hacker') return this.stage === STAGE.PICKED;
-        if (i === 'bolt' && toolId === 'drill') return this.stage === STAGE.KEYPAD_BYPASSED;
-        return false;
-    }
-
-    _raycastTarget(raycaster) {
-        const targets = [this.room.lock, this.room.keypad, this.room.bolt];
-        const hits = raycaster.intersectObjects(targets, true);
-        if (hits.length === 0) return null;
-        if (hits[0].distance > MAX_USE_DIST) return null;
-        // Walk up to find the object with userData.interaction
-        let o = hits[0].object;
-        while (o && !o.userData.interaction) o = o.parent;
-        return o;
-    }
-
-    _refreshBars() {
-        this._setBarFill(this._pickBar, this.pickProgress);
-        this._setBarFill(this._hackBar, this.hackProgress);
-        this._setBarFill(this._drillBar, this.drillProgress);
-    }
-
-    _setBarFill(bar, t) {
-        const fill = bar.getObjectByName('fill');
-        fill.scale.x = Math.max(0.001, t);
-        fill.position.x = -0.075 + (t * 0.15) / 2;
-        bar.visible = t > 0.001 || this.stage !== STAGE.UNLOCKED;
-    }
-
-    // Bag drop zone (axis-aligned bounding box around the duffel)
+    // The duffel-bag drop-zone bounds (used by main.js to detect collected loot)
     getLootBagBounds() {
         if (!this.room.bag) return null;
         const box = new THREE.Box3().setFromObject(this.room.bag);
-        // Expand vertically so the player doesn't have to drop pixel-perfect
         box.expandByVector(new THREE.Vector3(0.1, 0.5, 0.1));
         return box;
     }
@@ -218,17 +200,27 @@ export class VaultStateMachine {
 
 function makeProgressBar(color) {
     const group = new THREE.Group();
-    const bgGeo = new THREE.PlaneGeometry(0.16, 0.025);
-    const bgMat = new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.7 });
-    const bg = new THREE.Mesh(bgGeo, bgMat);
+    const bg = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.2, 0.03),
+        new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.75 })
+    );
     group.add(bg);
 
-    const fillGeo = new THREE.PlaneGeometry(0.15, 0.018);
-    const fillMat = new THREE.MeshBasicMaterial({ color });
-    const fill = new THREE.Mesh(fillGeo, fillMat);
+    const fill = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.19, 0.022),
+        new THREE.MeshBasicMaterial({ color })
+    );
     fill.name = 'fill';
     fill.position.z = 0.001;
     fill.scale.x = 0.001;
     group.add(fill);
     return group;
 }
+
+// Helper accessible on the instance via prototype binding
+VaultStateMachine.prototype._setBarFill = function (bar, t) {
+    const fill = bar.getObjectByName('fill');
+    if (!fill) return;
+    fill.scale.x = Math.max(0.001, t);
+    fill.position.x = -0.095 + (t * 0.19) / 2;
+};

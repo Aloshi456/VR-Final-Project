@@ -1,13 +1,11 @@
-// Multi-tool inventory system.
-// Each controller has its own equipped tool. Squeeze (grip) cycles through:
-//   EMPTY -> LOCKPICK -> HACKER -> DRILL -> EMPTY
+// Tool meshes.
+// Tools are physical pickups on the table - the player walks up, grabs one,
+// and brings it to the matching vault target. The "equipped tool" is just
+// whichever toolId is on the held mesh in the player's hand.
 //
-// When equipped, the tool mesh is parented to the controller so it follows the
-// hand. The tool ID is what the vault state machine reads to decide whether a
-// trigger press counts as "using" it.
-//
-// Custom Blender tool models can be loaded by passing a GLTFLoader and dropping
-// .glb files in /models. See the loadModelOrFallback helper.
+// This module exports buildToolMesh(id) so scene.js can spawn the procedural
+// tool meshes on the table. The legacy ToolSystem class (grip-button cycle)
+// is kept for backward-compat but is no longer the primary interaction.
 
 import * as THREE from 'three';
 
@@ -86,6 +84,19 @@ export class ToolSystem {
         }
         if (onChange) onChange();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Public factory: build a procedural tool mesh by id. scene.js uses this to
+// place tools on the table.
+// ---------------------------------------------------------------------------
+export function buildToolMesh(id) {
+    const def = TOOL_DEFS[id];
+    if (!def) throw new Error(`Unknown tool id: ${id}`);
+    const mesh = def.build(def.color);
+    mesh.userData.toolId = id;
+    mesh.userData.toolName = def.displayName;
+    return mesh;
 }
 
 // ---------------------------------------------------------------------------
