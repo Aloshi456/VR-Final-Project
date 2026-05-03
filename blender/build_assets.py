@@ -21,11 +21,31 @@ import math
 import os
 
 # --------------------------------------------------------------------------
-# Output directory: ../models relative to this script
+# Output directory: <project root>/models
+#
+# We resolve this by walking up from the .blend file (or Blender's CWD) until
+# we find a folder that contains an "index.html" or "js/" - that's the project
+# root. This way the script writes to the right /models folder regardless of
+# whether the .blend was saved next to the script or inside the project root.
 # --------------------------------------------------------------------------
+def _find_project_root(start):
+    cur = os.path.abspath(start)
+    for _ in range(6):
+        # Either index.html or js/ is a strong signal we're at the WebXR root
+        if os.path.isfile(os.path.join(cur, "index.html")) or os.path.isdir(os.path.join(cur, "js")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    # Fallback: the script's own folder's parent (assumes /blender/build_assets.py)
+    return os.path.dirname(start)
+
 SCRIPT_DIR = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-OUT_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "models"))
+PROJECT_ROOT = _find_project_root(SCRIPT_DIR)
+OUT_DIR = os.path.join(PROJECT_ROOT, "models")
 os.makedirs(OUT_DIR, exist_ok=True)
+print(f"[heist] writing GLBs to {OUT_DIR}")
 
 # --------------------------------------------------------------------------
 # Helpers
