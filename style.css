@@ -56,3 +56,59 @@ body {
     color: #ffcc55;
     font-weight: 700;
 }
+
+/* Center crosshair - visible only when pointer is locked (i.e., the player
+   is actively in first-person mode). Hidden in VR. */
+#crosshair {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: 14px;
+    height: 14px;
+    margin: -7px 0 0 -7px;
+    pointer-events: none;
+    z-index: 90;
+    display: none;
+}
+#crosshair::before,
+#crosshair::after {
+    content: "";
+    position: absolute;
+    background: rgba(255, 255, 255, 0.85);
+    box-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+#crosshair::before {
+    /* horizontal bar */
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 2px;
+    margin-top: -1px;
+}
+#crosshair::after {
+    /* vertical bar */
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 2px;
+    margin-left: -1px;
+}
+body.aiming #crosshair { display: block; }
+
+/* Custom VR / status banner */
+#vr-status {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.75);
+    color: #ffcc55;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 0.85em;
+    pointer-events: none;
+    z-index: 95;
+    max-width: 480px;
+    text-align: center;
+    display: none;
+}

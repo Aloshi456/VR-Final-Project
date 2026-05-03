@@ -53,6 +53,8 @@ export class DesktopController {
 
         document.addEventListener('pointerlockchange', () => {
             this._locked = (document.pointerLockElement === this.dom);
+            // Toggle the crosshair only while the player is actively aiming
+            document.body.classList.toggle('aiming', this._locked);
         });
 
         document.addEventListener('mousemove', (e) => {
