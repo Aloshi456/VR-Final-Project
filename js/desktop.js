@@ -95,8 +95,9 @@ export class DesktopController {
             this.enabled = true;
         });
 
-        // Start at the player spawn
-        this.position = new THREE.Vector3(0, PLAYER_HEIGHT, 3);
+        // Start at the player spawn (inside the antechamber, facing the vault).
+        // The room front wall is at z=2, so we sit at z=1 with breathing room.
+        this.position = new THREE.Vector3(0, PLAYER_HEIGHT, 1);
     }
 
     update(dt) {

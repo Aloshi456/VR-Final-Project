@@ -116,8 +116,8 @@ export function buildVaultRoom(scene, world, sync, sequence) {
     boltMesh.userData.interaction = 'bolt';
     scene.add(boltMesh);
 
-    // ---- Tool table + tools + note ----
-    createToolTable(scene);
+    // ---- Tool table (with physics) + tools + note ----
+    createToolTable(scene, world);
     const tableTools = createTableTools(scene, world, sync);
     const sequenceNote = createSequenceNote(scene, sequence);
 
@@ -502,45 +502,106 @@ function createLoot(scene, world, sync) {
     return items;
 }
 
+// Open treasure chest. The "drop loot here" zone is the top opening.
+// Built as a U-shaped wooden box (4 walls + floor, no lid) so the player can
+// clearly see where to drop the gold coins. Yellow trim lights up the rim.
 function createDuffelBag(scene) {
     const group = new THREE.Group();
-    const body = new THREE.Mesh(
-        new THREE.BoxGeometry(0.7, 0.35, 0.5),
-        new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9 })
-    );
-    body.castShadow = true;
-    group.add(body);
 
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x4a2c1a, roughness: 0.85 });
+    const woodDarkMat = new THREE.MeshStandardMaterial({ color: 0x2a1810, roughness: 0.9 });
+
+    const w = 0.7, d = 0.5, wallH = 0.35, wallT = 0.05;
+
+    // Floor
+    const floor = new THREE.Mesh(
+        new THREE.BoxGeometry(w, wallT, d),
+        woodMat
+    );
+    floor.position.y = wallT / 2;
+    floor.receiveShadow = true;
+    group.add(floor);
+
+    // Four walls
+    const sides = [
+        { w, h: wallH, d: wallT, x: 0, y: wallH / 2 + wallT, z: -d / 2 + wallT / 2 },
+        { w, h: wallH, d: wallT, x: 0, y: wallH / 2 + wallT, z:  d / 2 - wallT / 2 },
+        { w: wallT, h: wallH, d, x: -w / 2 + wallT / 2, y: wallH / 2 + wallT, z: 0 },
+        { w: wallT, h: wallH, d, x:  w / 2 - wallT / 2, y: wallH / 2 + wallT, z: 0 },
+    ];
+    for (const s of sides) {
+        const wall = new THREE.Mesh(new THREE.BoxGeometry(s.w, s.h, s.d), woodDarkMat);
+        wall.position.set(s.x, s.y, s.z);
+        wall.castShadow = true;
+        group.add(wall);
+    }
+
+    // Glowing rim around the opening - signals "drop loot here"
     const rim = new THREE.Mesh(
-        new THREE.TorusGeometry(0.28, 0.02, 8, 32),
-        new THREE.MeshStandardMaterial({ color: 0xffcc55, emissive: 0x553300 })
+        new THREE.TorusGeometry(0.28, 0.015, 8, 32),
+        new THREE.MeshStandardMaterial({
+            color: 0xffcc55,
+            emissive: 0xffaa00,
+            emissiveIntensity: 0.8,
+        })
     );
     rim.rotation.x = Math.PI / 2;
-    rim.position.y = 0.18;
+    rim.position.y = wallH + wallT + 0.001;
     rim.scale.set(1.2, 1, 0.8);
     group.add(rim);
 
-    group.position.set(1.3, 0.18, 0.8);
+    // "DROP LOOT" label on the floor of the chest, made with a CanvasTexture
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1a1208';
+    ctx.fillRect(0, 0, 256, 128);
+    ctx.fillStyle = '#ffcc55';
+    ctx.font = 'bold 36px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('DROP LOOT', 128, 64);
+    ctx.font = 'italic 22px Georgia, serif';
+    ctx.fillText('HERE', 128, 96);
+    const labelTex = new THREE.CanvasTexture(canvas);
+    labelTex.colorSpace = THREE.SRGBColorSpace;
+    const label = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.5, 0.25),
+        new THREE.MeshStandardMaterial({ map: labelTex, roughness: 0.95 })
+    );
+    label.rotation.x = -Math.PI / 2;
+    label.position.y = wallT + 0.001;
+    group.add(label);
+
+    group.position.set(1.3, 0, 0.8);
     scene.add(group);
     return group;
 }
 
-function createToolTable(scene) {
+function createToolTable(scene, world) {
+    const tableW = 1.2, tableH = 0.05, tableD = 0.6;
+    const tablePos = new THREE.Vector3(2.6, 0.95, 0);
+
     const table = new THREE.Mesh(
-        new THREE.BoxGeometry(1.2, 0.05, 0.6),
+        new THREE.BoxGeometry(tableW, tableH, tableD),
         new THREE.MeshStandardMaterial({ color: 0x4a3a2a, roughness: 0.8 })
     );
-    table.position.set(2.6, 0.95, 0);
+    table.position.copy(tablePos);
     table.castShadow = true;
     table.receiveShadow = true;
     scene.add(table);
+
+    // Static physics body so tools rest on the surface instead of falling through
+    const tableBody = new CANNON.Body({ mass: 0 });
+    tableBody.addShape(new CANNON.Box(new CANNON.Vec3(tableW / 2, tableH / 2, tableD / 2)));
+    tableBody.position.copy(tablePos);
+    world.addBody(tableBody);
 
     const legGeo = new THREE.BoxGeometry(0.06, 0.95, 0.06);
     const legMat = new THREE.MeshStandardMaterial({ color: 0x2a2018, roughness: 0.9 });
     const offsets = [[-0.55, -0.25], [0.55, -0.25], [-0.55, 0.25], [0.55, 0.25]];
     for (const [dx, dz] of offsets) {
         const l = new THREE.Mesh(legGeo, legMat);
-        l.position.set(table.position.x + dx, 0.475, table.position.z + dz);
+        l.position.set(tablePos.x + dx, 0.475, tablePos.z + dz);
         scene.add(l);
     }
 }

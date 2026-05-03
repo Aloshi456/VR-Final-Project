@@ -62,7 +62,8 @@ function init() {
     scene.fog = new THREE.Fog(0x0a0a0f, 6, 20);
 
     camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
-    camera.position.set(0, 1.6, 3);
+    // Spawn inside the room (front wall at z=2). z=1 keeps breathing room.
+    camera.position.set(0, 1.6, 1);
 
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
