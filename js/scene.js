@@ -285,6 +285,12 @@ function createVaultDoor(scene, world, sync) {
         const model = gltf.scene;
         model.traverse((c) => { if (c.isMesh) c.castShadow = true; });
 
+        // Flip 180 around Y. Blender's +Y axis (where the wheel handle and
+        // rivets were placed in build_assets.py) becomes -Z after GLTF export,
+        // which puts the "front" of the door on the far side from the player.
+        // Rotating the model 180 around Y faces the front toward the player.
+        model.rotation.y = Math.PI;
+
         // Auto-fit the model to the physics body's expected dimensions.
         // The Blender script outputs a door slightly larger than 2.0 x 2.6 x 0.3
         // because of the bevel and rivets - we scale uniformly so it fits.
