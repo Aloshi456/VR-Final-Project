@@ -23,10 +23,12 @@ const goldMat = new THREE.MeshStandardMaterial({ color: 0xffcc33, roughness: 0.2
 const rivetMat = new THREE.MeshStandardMaterial({ color: 0x222228, roughness: 0.5, metalness: 0.9 });
 
 export function buildVaultRoom(scene, world, sync, sequence) {
-    // ---- Lights ----
-    scene.add(new THREE.HemisphereLight(0xb0b0b0, 0x111111, 0.55));
+    // ---- Lights (cinematic / dramatic) ----
+    // Cool dim ambient - makes shadows pop
+    scene.add(new THREE.HemisphereLight(0x4a5a7a, 0x080808, 0.35));
 
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.6);
+    // Key light: warm directional from above-left, casts shadows
+    const keyLight = new THREE.DirectionalLight(0xfff2d8, 1.3);
     keyLight.position.set(4, 6, 3);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(1024, 1024);
@@ -36,16 +38,56 @@ export function buildVaultRoom(scene, world, sync, sequence) {
     keyLight.shadow.camera.bottom = -8;
     scene.add(keyLight);
 
-    const spot = new THREE.SpotLight(0xffaa55, 8, 8, Math.PI / 6, 0.4, 1.2);
+    // Hero spotlight on the vault door - strong amber wash
+    const spot = new THREE.SpotLight(0xffaa55, 12, 9, Math.PI / 6, 0.4, 1.2);
     spot.position.set(0, 3.5, -1);
     spot.target.position.set(0, 1.3, -4.5);
+    spot.castShadow = true;
     scene.add(spot);
     scene.add(spot.target);
 
-    // Light over the table so the player can read the note
-    const tableLight = new THREE.PointLight(0xfff0c0, 4, 4, 1.5);
-    tableLight.position.set(2.6, 1.8, 0);
-    scene.add(tableLight);
+    // Table accent light (warm bulb directly over the note + tools)
+    addCeilingLamp(scene, { x: 2.6, z: 0, color: 0xfff0c0, intensity: 6 });
+
+    // Two cool blue accent lights along the side walls for atmosphere
+    const blueAccent1 = new THREE.PointLight(0x4a7aff, 2.5, 6, 1.5);
+    blueAccent1.position.set(-3.5, 2.5, -1.5);
+    scene.add(blueAccent1);
+
+    const blueAccent2 = new THREE.PointLight(0x4a7aff, 2.5, 6, 1.5);
+    blueAccent2.position.set(3.5, 2.5, -3.5);
+    scene.add(blueAccent2);
+
+    // Red emergency lamp by the vault door (security-system vibe)
+    const emergencyLamp = new THREE.PointLight(0xff2222, 4, 5, 2);
+    emergencyLamp.position.set(2.5, 2.8, -4.4);
+    scene.add(emergencyLamp);
+    // Visible bulb for the red lamp
+    const lampBulb = new THREE.Mesh(
+        new THREE.SphereGeometry(0.06, 16, 16),
+        new THREE.MeshStandardMaterial({
+            color: 0xff2222, emissive: 0xff2222, emissiveIntensity: 2,
+        })
+    );
+    lampBulb.position.copy(emergencyLamp.position);
+    scene.add(lampBulb);
+    // Subtle pulsing — flicker via animation in main loop is overkill; use a
+    // cheap intensity wobble via callback that the renderer ticks.
+    emergencyLamp.userData.pulsePhase = 0;
+    emergencyLamp.userData.tick = (t) => {
+        emergencyLamp.intensity = 3.5 + Math.sin(t * 3) * 0.5;
+    };
+    scene._dynamicLights = scene._dynamicLights || [];
+    scene._dynamicLights.push(emergencyLamp);
+
+    // Inside the vault: golden glow from the loot pedestal
+    const lootGlow = new THREE.PointLight(0xffcc55, 6, 5, 2);
+    lootGlow.position.set(0, 1.0, -7.5);
+    scene.add(lootGlow);
+
+    // Spawn-side overhead lamps along the antechamber
+    addCeilingLamp(scene, { x: -2.5, z: 0, color: 0xffe0a8, intensity: 4 });
+    addCeilingLamp(scene, { x: 0, z: 0.8, color: 0xffe0a8, intensity: 4 });
 
     // ---- Room dimensions ----
     const W = 8, D = 10, H = 3.5;
@@ -205,11 +247,19 @@ function addWall(scene, world, { w, h, x, y, z, rotY }) {
     mesh.receiveShadow = true;
     scene.add(mesh);
 
-    const halfThick = 0.05;
+    // Thick collision body so fast-moving physics objects (coins, dropped
+    // tools) don't tunnel through. Half-thickness 0.2m = 0.4m thick wall.
+    const halfThick = 0.2;
+    // Push the collider behind the visual plane along its normal so the
+    // player's mesh side stays visible.
+    const normal = new THREE.Vector3(0, 0, 1).applyEuler(new THREE.Euler(0, rotY, 0));
+    const cx = x - normal.x * halfThick;
+    const cz = z - normal.z * halfThick;
+
     const box = new CANNON.Box(new CANNON.Vec3(w / 2, h / 2, halfThick));
     const body = new CANNON.Body({ mass: 0 });
     body.addShape(box);
-    body.position.set(x, y, z);
+    body.position.set(cx, y, cz);
     body.quaternion.setFromEuler(0, rotY, 0);
     world.addBody(body);
     return mesh;
@@ -575,6 +625,45 @@ function createDuffelBag(scene) {
     group.position.set(1.3, 0, 0.8);
     scene.add(group);
     return group;
+}
+
+// Hanging ceiling lamp - shade mesh + point light + visible bulb
+function addCeilingLamp(scene, { x, z, color, intensity }) {
+    const ceilY = 3.4;
+
+    // Wire/cord
+    const cord = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.005, 0.005, 0.4, 6),
+        new THREE.MeshBasicMaterial({ color: 0x111111 })
+    );
+    cord.position.set(x, ceilY - 0.2, z);
+    scene.add(cord);
+
+    // Shade (cone)
+    const shade = new THREE.Mesh(
+        new THREE.ConeGeometry(0.15, 0.18, 16, 1, true),
+        new THREE.MeshStandardMaterial({
+            color: 0x1a1a1a, side: THREE.DoubleSide, roughness: 0.7,
+        })
+    );
+    shade.position.set(x, ceilY - 0.4, z);
+    scene.add(shade);
+
+    // Visible bulb
+    const bulb = new THREE.Mesh(
+        new THREE.SphereGeometry(0.04, 12, 12),
+        new THREE.MeshStandardMaterial({
+            color, emissive: color, emissiveIntensity: 1.2,
+        })
+    );
+    bulb.position.set(x, ceilY - 0.5, z);
+    scene.add(bulb);
+
+    // Light source
+    const light = new THREE.PointLight(color, intensity, 6, 1.5);
+    light.position.set(x, ceilY - 0.5, z);
+    light.castShadow = false; // perf: only key light casts shadows
+    scene.add(light);
 }
 
 function createToolTable(scene, world) {

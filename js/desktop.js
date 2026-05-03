@@ -156,14 +156,15 @@ export class DesktopController {
 
     // AABB collision check: would the player capsule at (x, z) overlap any blocker?
     // Player is approximated as a vertical box centered at (x, PLAYER_HEIGHT/2, z).
+    // If the player is holding something, we widen the radius so the held
+    // object doesn't clip through walls.
     _collides(x, z) {
-        const r = this.PLAYER_RADIUS;
+        const holding = !!this.fakeController.userData.selected;
+        const r = this.PLAYER_RADIUS + (holding ? 0.3 : 0);
         this._playerBox.min.set(x - r, 0.05, z - r);
         this._playerBox.max.set(x + r, PLAYER_HEIGHT, z + r);
         for (const b of this.blockers) {
-            // Skip invisible blockers
             if (!b.visible) continue;
-            // Skip the vault door once it's been unlocked / swung open.
             if (b.userData?.isOpen) continue;
             this._tmpBox.setFromObject(b);
             if (this._playerBox.intersectsBox(this._tmpBox)) return true;

@@ -22,6 +22,7 @@ import { PhysicsSync } from './physics.js';
 import { DesktopController } from './desktop.js';
 
 let camera, scene, renderer;
+let xrRig;       // Group holding the camera + controllers, positioned in the world
 let physicsWorld;
 let raycaster;
 let controller1, controller2;
@@ -71,9 +72,36 @@ function init() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.xr.enabled = true;
+    renderer.xr.setReferenceSpaceType('local-floor');
     renderer.setAnimationLoop(animate);
     document.body.appendChild(renderer.domElement);
-    document.body.appendChild(VRButton.createButton(renderer));
+
+    // Custom VRButton - logs session lifecycle so we can see in DevTools
+    // exactly why "Enter VR" might not appear to do anything.
+    const vrBtn = VRButton.createButton(renderer);
+    document.body.appendChild(vrBtn);
+
+    // XR rig: a group at the spawn position. The camera and controllers are
+    // children of the rig. When XR starts, the headset's local-floor reference
+    // is at the rig's origin, so the player appears inside the room (not at
+    // world origin).
+    xrRig = new THREE.Group();
+    xrRig.position.set(0, 0, 1);
+    scene.add(xrRig);
+
+    renderer.xr.addEventListener('sessionstart', () => {
+        console.log('[heist] XR session started');
+    });
+    renderer.xr.addEventListener('sessionend', () => {
+        console.log('[heist] XR session ended');
+    });
+
+    // Surface unhandled session errors (the default VRButton swallows them)
+    window.addEventListener('unhandledrejection', (e) => {
+        if (String(e.reason).toLowerCase().includes('xr')) {
+            console.error('[heist] XR session rejection:', e.reason);
+        }
+    });
 
     physicsWorld = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
     physicsWorld.broadphase = new CANNON.NaiveBroadphase();
@@ -121,21 +149,21 @@ function setupControllers() {
     controller1 = renderer.xr.getController(0);
     controller1.addEventListener('selectstart', onSelectStart);
     controller1.addEventListener('selectend', onSelectEnd);
-    scene.add(controller1);
+    xrRig.add(controller1);
 
     controller2 = renderer.xr.getController(1);
     controller2.addEventListener('selectstart', onSelectStart);
     controller2.addEventListener('selectend', onSelectEnd);
-    scene.add(controller2);
+    xrRig.add(controller2);
 
     const factory = new XRControllerModelFactory();
     controllerGrip1 = renderer.xr.getControllerGrip(0);
     controllerGrip1.add(factory.createControllerModel(controllerGrip1));
-    scene.add(controllerGrip1);
+    xrRig.add(controllerGrip1);
 
     controllerGrip2 = renderer.xr.getControllerGrip(1);
     controllerGrip2.add(factory.createControllerModel(controllerGrip2));
-    scene.add(controllerGrip2);
+    xrRig.add(controllerGrip2);
 
     const lineGeo = new THREE.BufferGeometry().setFromPoints([
         new THREE.Vector3(0, 0, 0),
@@ -151,19 +179,23 @@ function onSelectStart(event) {
     const controller = event.target;
     setRaycasterFromController(raycaster, controller);
 
-    // If already holding something, do nothing (must release first)
     if (controller.userData.selected) return;
 
     const hits = raycaster.intersectObjects(grabbables.children, true);
     if (hits.length === 0) return;
 
-    // Walk up the parent chain to find the actual grabbable root
     let obj = hits[0].object;
     while (obj && !grabbables.children.includes(obj)) obj = obj.parent;
     if (!obj) return;
 
     physicsSync.setKinematic(obj, true);
     controller.attach(obj);
+    // Snap to a consistent "hand position" relative to the controller so the
+    // tool sits in front of the player rather than wherever it happened to be
+    // when the trigger was pressed. This also keeps the held object close
+    // enough to the camera that the player's collision radius covers it.
+    obj.position.set(0, -0.15, -0.25);
+    obj.rotation.set(-Math.PI / 4, 0, 0);
     controller.userData.selected = obj;
     if (obj.material && obj.material.emissive) obj.material.emissive.setHex(0x444400);
 }
@@ -244,11 +276,18 @@ function onWindowResize() {
 
 function animate() {
     const dt = Math.min(clock.getDelta(), 1 / 30);
+    const t = clock.getElapsedTime();
     physicsWorld.step(1 / 60, dt, 3);
     physicsSync.sync();
     if (desktop) desktop.update(dt);
 
-    // Pass all possible controllers to the vault so it can check held tools
+    // Tick any dynamic lights (red emergency lamp pulse)
+    if (scene._dynamicLights) {
+        for (const l of scene._dynamicLights) {
+            if (l.userData?.tick) l.userData.tick(t);
+        }
+    }
+
     vault.update(dt, [
         controller1,
         controller2,
