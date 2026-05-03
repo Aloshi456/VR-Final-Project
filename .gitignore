@@ -1,0 +1,20 @@
+# Blender backup files
+*.blend1
+*.blend2
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Node (in case anyone adds tooling later)
+node_modules/
+
+# Build artifacts
+dist/
+build/

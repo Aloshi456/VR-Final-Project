@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title>VR Heist Simulator - Group 13</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <link rel="stylesheet" href="style.css">
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+            "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js",
+            "cannon-es-debugger": "https://cdn.jsdelivr.net/npm/cannon-es-debugger@1.0.0/dist/cannon-es-debugger.js"
+        }
+    }
+    </script>
+</head>
+
+<body>
+    <div id="overlay">
+        <h1>VR Heist Simulator</h1>
+        <p id="objective">Objective: Crack the vault and collect the loot.</p>
+        <p>Tool: <span id="tool-name">EMPTY HAND</span></p>
+        <p>Stage: <span id="stage-name">LOCKED</span></p>
+        <p>Loot: <span id="loot-count">0</span> / <span id="loot-total">0</span></p>
+        <hr>
+        <p style="font-size: 0.8em; opacity: 0.85;">
+            <b>VR controls:</b><br>
+            Trigger - grab object / use tool<br>
+            Grip - cycle tools (Lockpick - Hacker - Drill)<br>
+            <br>
+            <b>Desktop controls:</b> click canvas to capture mouse<br>
+            <span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> walk &nbsp;
+            <span class="key">Shift</span> sprint &nbsp;
+            <span class="key">Space</span> jump<br>
+            Mouse - look around<br>
+            <span class="key">L-Click</span> trigger (use tool / grab)<br>
+            <span class="key">R-Click</span> cycle tool<br>
+            <span class="key">T</span> cycle tool (kbd) &nbsp;
+            <span class="key">U</span> skip stage<br>
+            <span class="key">R</span> reset &nbsp;
+            <span class="key">B</span> physics debug &nbsp;
+            <span class="key">Esc</span> release mouse
+        </p>
+    </div>
+
+    <script type="module" src="js/main.js"></script>
+</body>
+
+</html>
