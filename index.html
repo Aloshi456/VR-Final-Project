@@ -6,11 +6,33 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <link rel="stylesheet" href="style.css">
+
+    <script>
+        /*
+            Compatibility patch for Immersive Web Emulator v2.0.0-alpha.
+
+            Some newer Three.js/WebXR setups try to use WebXR Layers through
+            XRWebGLBinding.createProjectionLayer(). The emulator can fail there.
+            Removing only createProjectionLayer makes Three.js fall back to the
+            older XRWebGLLayer path, which is what worked in the lab test.
+        */
+        try {
+            if (window.XRWebGLBinding && window.XRWebGLBinding.prototype) {
+                if (window.XRWebGLBinding.prototype.createProjectionLayer) {
+                    delete window.XRWebGLBinding.prototype.createProjectionLayer;
+                    console.log('[heist] createProjectionLayer disabled for emulator compatibility');
+                }
+            }
+        } catch (err) {
+            console.warn('[heist] Could not patch XRWebGLBinding:', err);
+        }
+    </script>
+
     <script type="importmap">
     {
         "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+            "three": "https://cdn.jsdelivr.net/npm/three@0.172.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.172.0/examples/jsm/",
             "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js",
             "cannon-es-debugger": "https://cdn.jsdelivr.net/npm/cannon-es-debugger@1.0.0/dist/cannon-es-debugger.js"
         }
@@ -51,6 +73,12 @@
 
     <div id="crosshair"></div>
     <div id="vr-status"></div>
+
+    <div id="win-screen" class="hidden">
+        <h2>HEIST COMPLETE</h2>
+        <p>You cracked the vault and collected the loot.</p>
+        <p class="small">Press R to reset and replay.</p>
+    </div>
 
     <script type="module" src="js/main.js"></script>
 </body>
